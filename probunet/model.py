@@ -567,6 +567,7 @@ class ProbabilisticSegmentationNet(ConvModule):
         self._posterior = None
 
     def forward(self, input_, seg=None, make_onehot=True, make_onehot_classes=None, newaxis=False):
+        """Forward pass includes reparametrization sampling during training, otherwise it'll just take the prior mean."""
 
         self.encode_prior(input_)
         if self.training:
@@ -601,6 +602,13 @@ class ProbabilisticSegmentationNet(ConvModule):
         return self._posterior
 
     def sample_prior(self, N=1, out_device=None, input_=None):
+        """Draw multiple samples from the current prior.
+        
+        * input_ is required if no activations are stored in task_net.
+        * If input_ is given, prior will automatically be encoded again.
+        * Returns either a single sample or a list of samples.
+
+        """
 
         if out_device is None:
             if self.last_activations is not None:
@@ -626,6 +634,7 @@ class ProbabilisticSegmentationNet(ConvModule):
                 return result
 
     def reconstruct(self, sample=None, use_posterior_mean=True, out_device=None, input_=None):
+        """Reconstruct a sample or the current posterior mean. Will not compute gradients!"""
 
         if self.posterior is None and sample is None:
             raise ValueError("'posterior' is currently None. Please pass an input and a segmentation first.")
@@ -642,12 +651,20 @@ class ProbabilisticSegmentationNet(ConvModule):
             return self.task_net(input_, sample, reuse_last_activations=True).to(device=out_device)
 
     def kl_divergence(self):
+        """Compute current KL, requires existing prior and posterior."""
 
         if self.posterior is None or self.prior is None:
             raise ValueError("'prior' and 'posterior' must not be None, but prior={} and posterior={}".format(self.prior, self.posterior))
         return torch.distributions.kl_divergence(self.posterior, self.prior).sum()
 
     def elbo(self, seg, input_=None, nll_reduction="sum", beta=1.0, make_onehot=True, make_onehot_classes=None, newaxis=False):
+        """Compute the ELBO with seg as ground truth.
+
+        * Prior is expected and will not be encoded.
+        * If input_ is given, posterior will automatically be encoded.
+        * Either input_ or stored activations must be available.
+
+        """
 
         if self.last_activations is None:
             raise ValueError("'last_activations' is currently None. Please pass an input first.")

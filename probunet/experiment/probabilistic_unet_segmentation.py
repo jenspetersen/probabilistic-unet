@@ -1,4 +1,4 @@
-from probunet.experiment.tumorgrowthexperiment import TumorGrowthExperiment
+from probunet.experiment.probabilistic_unet_future_segmentation import ProbabilisticUNetFutureSegmentation
 
 import os
 import numpy as np
@@ -27,7 +27,7 @@ from probunet import data
 
 
 
-DESCRIPTION = "TBD"
+DESCRIPTION = "Segmentation with a Probabilistic U-Net. .test() will give results for upper bound in paper, .test_future() will give results for lower bound."
 
 
 def make_defaults(patch_size=112,
@@ -341,7 +341,7 @@ def make_defaults(patch_size=112,
     return {"DEFAULTS": DEFAULTS}, MODS
 
 
-class ProbabilisticUNetSegmentation(TumorGrowthExperiment):
+class ProbabilisticUNetSegmentation(ProbabilisticUNetFutureSegmentation):
 
     def setup_data(self):
 
@@ -352,65 +352,14 @@ class ProbabilisticUNetSegmentation(TumorGrowthExperiment):
         self.data_test = c.data_module.load(c.mmap_mode, subjects=c.subjects_test, npz=c.npz)
 
         self.generator_train = c.generator_train(
-            self.data_train, c.batch_size, 1,
+            self.data_train, c.batch_size, 3,
             number_of_threads_in_multithreaded=c.augmenter_train_kwargs.num_processes)
         self.generator_val = c.generator_val(
-            self.data_val, c.batch_size_val, 1,
+            self.data_val, c.batch_size_val, 3,
             number_of_threads_in_multithreaded=c.augmenter_val_kwargs.num_processes)
         self.generator_test = c.generator_val(
-            self.data_test, c.batch_size_val, 1,
+            self.data_test, c.batch_size_val, 3,
             number_of_threads_in_multithreaded=c.augmenter_val_kwargs.num_processes)
-
-    def setup_loss_and_eval(self):
-
-        c = self.config
-
-        self.criterion_segmentation = c.criterion_segmentation(**c.criterion_segmentation_kwargs)
-        if c.criterion_latent_init:
-            self.criterion_latent = c.criterion_latent(**c.criterion_latent_kwargs)
-        else:
-            self.criterion_latent = c.criterion_latent
-        self.evaluator = c.evaluator(**c.evaluator_kwargs)
-
-    def train(self, epoch):
-
-        c = self.config
-
-        t0 = time.time()
-
-        self.model.reset()
-        self.model.train()
-        self.optimizer.zero_grad()
-        self.scheduler.step(epoch=epoch)
-
-        data = next(self.augmenter_train)
-        input_, gt_segmentation, data = self.process_data(data, epoch)
-        prediction = self.model(input_, gt_segmentation, make_onehot=False)
-        if not c.criterion_segmentation_seg_onehot:
-            gt_segmentation = torch.argmax(gt_segmentation, 1, keepdim=False)
-
-        loss_segmentation = self.criterion_segmentation(prediction, gt_segmentation).sum()
-        loss_latent = self.criterion_latent(self.model.posterior, self.model.prior).sum()
-        loss = c.criterion_segmentation_weight * loss_segmentation + c.criterion_latent_weight * loss_latent
-        loss.backward()
-        self.optimizer.step()
-        self.optimizer.zero_grad()
-
-        training_time = time.time() - t0
-
-        loss_segmentation = loss_segmentation.detach().cpu()
-        loss_latent = loss_latent.detach().cpu()
-        prediction = prediction.detach().cpu()
-
-        data["loss_segmentation"] = loss_segmentation
-        data["loss_latent"] = loss_latent
-        data["prediction"] = prediction
-        data["training_time"] = training_time
-
-        self.train_log(data, epoch)
-
-        self.model.reset()
-        del input_, gt_segmentation, data
 
     def process_data(self, data, epoch):
 
@@ -418,8 +367,8 @@ class ProbabilisticUNetSegmentation(TumorGrowthExperiment):
 
         if c.debug < 2 or epoch == 0:
 
-            input_ = torch.from_numpy(data["data"][:, :c.in_channels]).to(dtype=torch.float32, device=c.device)
-            gt_segmentation = make_onehot_segmentation(torch.from_numpy(data["seg"][:, -1:]).to(dtype=torch.float32, device=c.device), c.labels)
+            input_ = torch.from_numpy(data["data"][:, c.in_channels:2*c.in_channels]).to(dtype=torch.float32, device=c.device)
+            gt_segmentation = make_onehot_segmentation(torch.from_numpy(data["seg"][:, -2:-1]).to(dtype=torch.float32, device=c.device), c.labels)
 
             if c.debug == 2:
                 self._memo_batch = (input_, gt_segmentation, data)
@@ -430,358 +379,23 @@ class ProbabilisticUNetSegmentation(TumorGrowthExperiment):
 
         return input_, gt_segmentation, data
 
-    def train_log(self, summary, epoch):
-
-        _backup = (epoch + 1) % self.config.backup_every == 0
-        _show = (epoch + 1) % self.config.show_every == 0
-
-        self.elog.show_text("{}/{}: {:.3f}".format(epoch, self.config.n_epochs, summary["training_time"]), name="Training Time")
-        self.elog.show_text("{}/{}: {:.3f}".format(epoch, self.config.n_epochs, summary["loss_segmentation"].item()), name="Segmentation Loss")
-        self.elog.show_text("{}/{}: {:.3f}".format(epoch, self.config.n_epochs, summary["loss_latent"].item()), name="Latent Loss")
-
-        self.add_result(summary["loss_segmentation"].item(), "loss_loss_segmentation", epoch, "Loss", plot_result=_show, plot_running_mean=True)
-        self.add_result(summary["loss_latent"].item(), "loss_latent", epoch, "Loss", plot_result=_show, plot_running_mean=True)
-
-        self.make_images(summary,
-                         epoch,
-                         save=_backup,
-                         show=_show,
-                         validate=False)
-        self.make_dist_plot(summary, epoch, save=_backup, show=_show, validate=False)
-
-    def validate(self, epoch):
+    def process_data_future(self, data, epoch):
 
         c = self.config
 
-        if (epoch+1) % c.validate_every == 0:
+        if c.debug < 2 or epoch == 0:
 
-            with torch.no_grad():
+            input_ = torch.from_numpy(data["data"][:, c.in_channels:2*c.in_channels]).to(dtype=torch.float32, device=c.device)
+            gt_segmentation = make_onehot_segmentation(torch.from_numpy(data["seg"][:, -1:]).to(dtype=torch.float32, device=c.device), c.labels)
 
-                t0 = time.time()
-                self.model.eval()
-
-                info = self.validate_make_default_info()
-                validation_scores = []
-
-                for d, data in enumerate(self.augmenter_val):
-
-                    # randomly decide whether to look at this batch, but with fallback so we don't validate nothing
-                    if c.validate_subset not in (False, None, 1.):
-                        rand_number = np.random.rand()
-                        if rand_number < 1 - c.validate_subset:
-                            if not (d * c.batch_size_val >= len(self.generator_val.possible_sets) - 1 and len(validation_scores) == 0):
-                                continue
-
-                    input_, gt_segmentation, data = self.process_data(data, epoch)
-                    prediction = self.model(input_, gt_segmentation, make_onehot=False).cpu()
-
-                    # iterate over batch and evaluate each instance separately
-                    for s, subject in enumerate(data["subject"]):
-
-                        name = "{}_{}".format(subject, data["timestep"][s])
-                        if name in info["coords"]["Subject and Timestep"]:
-                            continue
-                        else:
-                            info["coords"]["Subject and Timestep"].append(name)
-
-                        summary = data.copy()
-                        summary["data"] = data["data"][s:s+1]
-                        summary["seg"] = data["seg"][s:s+1]
-                        summary["prediction"] = prediction[s:s+1]
-
-                        if c.val_save_images:
-                            self.make_images(summary,
-                                             epoch,
-                                             label=name,
-                                             save=True,
-                                             show=False,
-                                             validate=True)
-
-                        if c.val_save_output:
-                            epoch_str = c.epoch_str_template.format(epoch)
-                            self.elog.save_numpy_data(summary["prediction"].numpy(), "validation/{}/{}_prediction.npy".format(epoch_str, name))
-
-                        current_score = self.validate_score(summary, epoch)
-                        validation_scores.append(current_score)
-
-                    del input_, gt_segmentation
-
-                validation_time = time.time() - t0
-                validation_scores = np.array(validation_scores)
-
-                data["validation_time"] = validation_time
-                data["validation_scores"] = validation_scores
-                data["validation_info"] = info
-
-                self.validate_log(data, epoch)
-
-                # draw a few different samples for the last data item
-                if c.val_example_samples >= 2:
-                    data = self.validate_draw_random_samples(self.augmenter_val)
-                    self.make_images_samples(data,
-                                             epoch,
-                                             save=True,
-                                             show=True,
-                                             validate=True)
-
-                self.model.reset()
-
-    def validate_draw_random_samples(self, augmenter):
-
-        c = self.config
-
-        # in 2D, the last batch will have little tumor, so select a random one
-        rand_position = np.random.randint(len(augmenter.generator.possible_sets))
-        data = augmenter.generator.make_batch(rand_position)
-        data = augmenter.transform(**data)
-        input_, gt_segmentation, data = self.process_data(data, 0)
-
-        # encode prior and generate activations, then draw actual samples
-        mean_prediction = self.model(input_, gt_segmentation, make_onehot=False).cpu()
-        samples = self.model.sample_prior(c.val_example_samples, "cpu")
-        samples = torch.stack(samples, 0).transpose(0, 1).contiguous()
-        v = list(samples.shape)[1:]
-        v[0] = samples.shape[0] * samples.shape[1]
-        samples = samples.view(*v)
-
-        data["prediction"] = mean_prediction
-        data["samples"] = samples
-
-        return data
-
-    def make_images_samples(self,
-                            summary,
-                            epoch,
-                            label=None,
-                            save=False,
-                            show=True,
-                            validate=False,
-                            axis=0):
-
-        if save is False and show is False:
-            return
-
-        patch_size = summary["samples"].shape[2:]
-        dim = len(patch_size)
-
-        predicted_seg = torch.argmax(summary["samples"], 1, keepdim=True).float()
-
-        if dim == 2:
-
-            segs = predicted_seg
-
-        elif dim == 3:
-
-            slc = [slice(None), ] * 5
-            slc[axis+2] = patch_size[axis] // 2
-            segs = predicted_seg[tuple(slc)]
+            if c.debug == 2:
+                self._memo_batch = (input_, gt_segmentation, data)
 
         else:
 
-            raise ValueError("Data must have 2 or 3 spatial dimensions, but found {}".format(dim))
+            return self._memo_batch
 
-        name = "samples"
-        if label is not None:
-            name = label + "_" + name
-        if validate:
-            name = "val/" + name
-        image_args = {
-            "normalize": True,
-            "range": (min(self.config.labels), max(self.config.labels)),
-            "nrow": self.config.val_example_samples,
-            "pad_value": 1
-        }
-
-        if show and self.vlog is not None:
-            self.vlog.show_image_grid(segs, name, image_args=image_args)
-        if save and self.elog is not None:
-            name = self.config.epoch_str_template.format(epoch) + "_" + name
-            self.elog.show_image_grid(segs, name, image_args=image_args)
-
-    def make_images(self,
-                    summary,
-                    epoch,
-                    label=None,
-                    save=False, show=True, validate=False):
-
-        if save is False and show is False:
-            return
-
-        input_data = torch.from_numpy(summary["data"]).float()
-        predicted_seg = torch.argmax(summary["prediction"], 1, keepdim=True).float().cpu()
-        reference_seg = torch.from_numpy(summary["seg"]).float()
-
-        if reference_seg.dim() == 4:
-            reference_seg = reference_seg.unsqueeze(1)
-
-        batch_size = input_data.shape[0]
-        patch_size = tuple(input_data.shape[2:])
-        dim = len(patch_size)
-        _range = (0., float(self.config.out_channels - 1))
-
-        if dim == 3:
-
-            for i in range(batch_size):
-
-                image_list = []
-                image_list.append(input_data[i:i+1, :, patch_size[0] // 2, :, :].transpose(0, 1))
-                image_list.append(input_data[i:i+1, :, :, patch_size[1] // 2, :].transpose(0, 1))
-                image_list.append(input_data[i:i+1, :, :, :, patch_size[2] // 2].transpose(0, 1))
-                image_list = torch.cat(image_list, 0)
-
-                name = "input_data_{}".format(i)
-                if label is not None:
-                    name = label + "_" + name
-                if validate:
-                    name = "val/" + name
-
-                if show and hasattr(self, "vlog") and self.vlog is not None:
-                    self.vlog.show_image_grid(image_list, name,
-                                              image_args={"normalize": True,
-                                                          "scale_each": True,
-                                                          "nrow": input_data.shape[1],
-                                                          "pad_value": 1})
-                if save:
-                    name = self.config.epoch_str_template.format(epoch) + "_" + name
-                    self.elog.show_image_grid(image_list, name,
-                                              image_args={"normalize": True,
-                                                          "scale_each": True,
-                                                          "nrow": input_data.shape[1],
-                                                          "pad_value": 1})
-
-                seg_list = []
-                for j in range(reference_seg.shape[1]):
-                    seg_list.append(reference_seg[i:i+1, j:j+1, patch_size[0] // 2, :, :].float().transpose(0, 1))
-                for j in range(predicted_seg.shape[1]):
-                    seg_list.append(predicted_seg[i:i+1, j:j+1, patch_size[0] // 2, :, :].float().transpose(0, 1))
-                for j in range(reference_seg.shape[1]):
-                    seg_list.append(reference_seg[i:i+1, j:j+1, :, patch_size[1] // 2, :].float().transpose(0, 1))
-                for j in range(predicted_seg.shape[1]):
-                    seg_list.append(predicted_seg[i:i+1, j:j+1, :, patch_size[1] // 2, :].float().transpose(0, 1))
-                for j in range(reference_seg.shape[1]):
-                    seg_list.append(reference_seg[i:i+1, j:j+1, :, :, patch_size[2] // 2].float().transpose(0, 1))
-                for j in range(predicted_seg.shape[1]):
-                    seg_list.append(predicted_seg[i:i+1, j:j+1, :, :, patch_size[2] // 2].float().transpose(0, 1))
-                seg_list = torch.cat(seg_list, 0)
-
-                name = "segmentation_{}".format(i)
-                if label is not None:
-                    name = label + "_" + name
-                if validate:
-                    name = "val/" + name
-
-                if show and hasattr(self, "vlog") and self.vlog is not None:
-                    self.vlog.show_image_grid(seg_list, name,
-                                              image_args={"normalize": True,
-                                                          "range": _range,
-                                                          "nrow": reference_seg.shape[1] + predicted_seg.shape[1],
-                                                          "pad_value": 1})
-                if save and hasattr(self, "elog"):
-                    name = self.config.epoch_str_template.format(epoch) + "_" + name
-                    self.elog.show_image_grid(seg_list, name,
-                                              image_args={"normalize": True,
-                                                          "range": _range,
-                                                          "nrow": reference_seg.shape[1] + predicted_seg.shape[1],
-                                                          "pad_value": 1})
-
-        else:
-
-            for i in range(input_data.shape[1]):
-
-                image_list = input_data[:, i:i+1]
-
-                name = "input_data_{}".format(i)
-                if label is not None:
-                    name = label + "_" + name
-                if validate:
-                    name = "val/" + name
-
-                if show and hasattr(self, "vlog") and self.vlog is not None:
-                    self.vlog.show_image_grid(image_list, name,
-                                              image_args={"normalize": True,
-                                                          "scale_each": True,
-                                                          "nrow": int(np.sqrt(image_list.shape[0])),
-                                                          "pad_value": 1})
-                if save and hasattr(self, "elog"):
-                    name = self.config.epoch_str_template.format(epoch) + "_" + name
-                    self.elog.show_image_grid(image_list, name,
-                                              image_args={"normalize": True,
-                                                          "scale_each": True,
-                                                          "nrow": int(np.sqrt(image_list.shape[0])),
-                                                          "pad_value": 1})
-
-            seg_list = []
-            for i in range(reference_seg.shape[0]):
-                seg_list.append(reference_seg[i:i+1, :].float().transpose(0, 1))
-                seg_list.append(predicted_seg[i:i+1, :].float().transpose(0, 1))
-            seg_list = torch.cat(seg_list, 0)
-
-            nrow_min = reference_seg.shape[1] + predicted_seg[1]
-            nrow = (int(np.sqrt(seg_list.shape[0])) // nrow_min + 1) * nrow_min
-
-            name = "segmentation"
-            if label is not None:
-                name = label + "_" + name
-            if validate:
-                name = "val/" + name
-
-            if show and hasattr(self, "vlog") and self.vlog is not None:
-                self.vlog.show_image_grid(seg_list, name,
-                                          image_args={"normalize": True,
-                                                      "range": _range,
-                                                      "nrow": nrow,
-                                                      "pad_value": 1})
-            if save and hasattr(self, "elog"):
-                name = self.config.epoch_str_template.format(epoch) + "_" + name
-                self.elog.show_image_grid(seg_list, name,
-                                          image_args={"normalize": True,
-                                                      "range": _range,
-                                                      "nrow": nrow,
-                                                      "pad_value": 1})
-
-    def make_dist_plot(self, summary, epoch, label=None, save=False, show=True, validate=False):
-
-        c = self.config
-
-        def density_fn(x, loc, scale):
-            return 1 / np.sqrt(2*np.pi*scale*scale) * np.exp(-(x-loc)*(x-loc)/(2*scale*scale))
-
-        prior_loc = self.model.prior.loc.detach().cpu().numpy()
-        prior_scale = self.model.prior.scale.detach().cpu().numpy()
-        posterior_loc = self.model.posterior.loc.detach().cpu().numpy()
-        posterior_scale = self.model.posterior.scale.detach().cpu().numpy()
-
-        prior_loc = prior_loc.reshape(prior_loc.shape[0], -1)
-        prior_scale = prior_scale.reshape(prior_scale.shape[0], -1)
-        posterior_loc = prior_loc.reshape(posterior_loc.shape[0], -1)
-        posterior_scale = prior_scale.reshape(posterior_scale.shape[0], -1)
-
-        x_values = np.linspace(*c.latent_plot_range, 500)
-
-        for batch in range(prior_loc.shape[0]):
-
-            name = "latent_{}".format(batch)
-            if label is not None:
-                name = label + "_" + name
-            if validate:
-                name = "val/" + name
-
-            data = []
-            legend_names = []
-            for latent_dim in range(prior_loc.shape[1]):
-                data.append(density_fn(x_values, prior_loc[batch, latent_dim], prior_scale[batch, latent_dim]))
-                legend_names.append("prior_{}".format(latent_dim))
-                data.append(density_fn(x_values, posterior_loc[batch, latent_dim], posterior_scale[batch, latent_dim]))
-                legend_names.append("posterior_{}".format(latent_dim))
-            data = np.array(data).T
-            data_x = np.repeat(x_values[np.newaxis, :], prior_loc.shape[1] * 2, axis=0).T
-
-            if show and self.vlog is not None:
-                self.vlog.show_lineplot(data, data_x, name=name, opts={"legend": legend_names})
-
-            if save and self.elog is not None:
-                name = self.config.epoch_str_template.format(epoch) + "_" + name
-                self.elog.show_lineplot(data, data_x, name=name, opts={"legend": legend_names})
+        return input_, gt_segmentation, data
 
     def test(self):
 
@@ -805,7 +419,7 @@ class ProbabilisticUNetSegmentation(TumorGrowthExperiment):
         if self.config.test_future:
             self.test_future()
 
-    def test_inner(self, augmenter, scores, info):
+    def test_inner(self, augmenter, scores, info, future=False):
 
         c = self.config
 
@@ -815,7 +429,10 @@ class ProbabilisticUNetSegmentation(TumorGrowthExperiment):
 
             for data in augmenter:
 
-                input_, gt_segmentation, data = self.process_data(data, 0)
+                if future:
+                    input_, gt_segmentation, data = self.process_data_future(data, 0)
+                else:
+                    input_, gt_segmentation, data = self.process_data(data, 0)
                 prediction = self.model(input_, gt_segmentation, make_onehot=False).cpu()
 
                 self.model.encode_posterior(input_, gt_segmentation, make_onehot=False)
@@ -872,6 +489,10 @@ class ProbabilisticUNetSegmentation(TumorGrowthExperiment):
                     summary = data.copy()
                     summary["data"] = data["data"][s:s+1]
                     summary["seg"] = data["seg"][s:s+1]
+                    if future:
+                        summary["seg"] = summary["seg"][:, -1:]
+                    else:
+                        summary["seg"] = summary["seg"][:, -2:-1]
                     summary["prediction"] = prediction[s:s+1]
 
                     if c.test_save_output:
@@ -923,7 +544,7 @@ class ProbabilisticUNetSegmentation(TumorGrowthExperiment):
             test_data = self.data_test
 
         generator = self.config.generator_val(
-            test_data, self.config.batch_size_val, 2,
+            test_data, self.config.batch_size_val, 3,
             number_of_threads_in_multithreaded=self.config.augmenter_val_kwargs.num_processes)
         transforms = []
         for t in sorted(self.config.transforms_val.keys()):
@@ -935,7 +556,7 @@ class ProbabilisticUNetSegmentation(TumorGrowthExperiment):
         augmenter = self.config.augmenter_val(generator,
                                               Compose(transforms),
                                               **self.config.augmenter_val_kwargs)
-        test_scores, info = self.test_inner(augmenter, [], info)
+        test_scores, info = self.test_inner(augmenter, [], info, future=True)
         test_scores = np.array(test_scores)
 
         self.elog.save_numpy_data(test_scores, "test_future.npy")
