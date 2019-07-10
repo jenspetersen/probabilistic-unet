@@ -3,7 +3,7 @@
 This repository contains two things:
 
 1. A generic PyTorch implementation of the [Probabilistic U-Net](https://arxiv.org/abs/1806.05034) that somewhat mirrors the signature of the [official implementation](https://github.com/SimonKohl/probabilistic_unet) in Tensorflow.
-2. Code (but not data unfortunately) to reproduce the results of our paper "Deep Probabilistic Modeling of Glioma Growth" that was accepted at MICCAI 2019.
+2. Code (but not data unfortunately) to reproduce the results of our paper "[Deep Probabilistic Modeling of Glioma Growth](http://arxiv.org/abs/1907.04064)" that was accepted at MICCAI 2019.
 
 
 # Installation
@@ -25,9 +25,9 @@ Our generic implementation of the Probabilistic U-Net is hopefully relatively st
 As you will have noticed, it also has a pretty generic name. That's because it doesn't actually require a U-Net, but can work with arbitrary segmentation architectures, as long as they:
 
 1. Allow injection of samples in some way.
-2. Provide the same API as our InjectionUNet (look at the calls to self.task_net to see requirements.)
+2. Provide the same signature as our InjectionUNet (look at the calls to self.task_net to see requirements.)
 
-Our encoder implementation also accepts injections, this is currently not used. Make sure to read
+Our encoder implementation also accepts injections, this is currently not used. Make sure to read the method docstrings of the ProbabilisticSegmentationNet, there are some quirks, e.g. `.reconstruct()` doesn't compute gradients.
 
 ## Experiments
 
@@ -40,7 +40,7 @@ Both subclass `PytorchExperiment` from trixi for logging etc. Please check the [
 
 At the moment, you won't be able to reproduce our results, because we can't publish the data (yet). But if you have your own data of longitudinal glioma growth, there's already a data loader for your convenience. Do the following:
 
-1. Put each patient in a 5D numpy array (time, channel, x, y, z), where channels should be (T1, T1ce, T2, FLAIR). The data should be skull-stripped and z-score normalized (subtract mean, divide by std).
+1. Put each patient in a 5D numpy array (time, channel, x, y, z), where channels should be (T1, T1ce, T2, FLAIR). The data should be skull-stripped, longitudinally registered and z-score normalized (subtract mean, divide by std).
 2. Put all patients in a folder, with file names identifier.npy
 3. Create a file multi_shapes.json in the same folder that contains a dictionary {identifier: shape-tuple}. We need this to have faster access to all shapes.
 4. (Optional) Create files identifier_crop.npy in the same folder that contain your data maximally cropped. The the `load()` method has an option `crop_data`. If you don't have cropped files, this needs to be False.
